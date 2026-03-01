@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from http import HTTPStatus
 from pathlib import Path
 from typing import Dict, List
@@ -44,6 +45,13 @@ if not dashscope.api_key:
 CHUNK_SIZE = 400
 CHUNK_OVERLAP = 80
 DEFAULT_TOP_K = 5
+_HEADING_PATTERNS = [
+	re.compile(r"^第[一二三四五六七八九十百千万零]+[章节条款]?"),
+	re.compile(r"^第?\d+[章节条款]?"),
+	re.compile(r"^(\d+\.|\d+．|\d+、)"),
+	re.compile(r"^[（(]?[一二三四五六七八九十]+[）).、]"),
+	re.compile(r"^[A-Za-z]{1,3}[\.、]\s*"),
+]
 
 _collection: Collection | None = None
 
@@ -195,24 +203,120 @@ def _extract_text(pdf_path: Path) -> str:
 
 
 def _chunk_text(text: str) -> List[str]:
-	"""按固定字符长度切块，重叠保证语义连续。"""
+	"""结合段落/标题的语义切块，尽量保持业务条款完整性。"""
 
-	if not text:
+	paragraphs = _split_paragraphs(text)
+	if not paragraphs:
 		return []
 
 	chunks: List[str] = []
-	start = 0
-	text_length = len(text)
-	while start < text_length:
-		end = min(start + CHUNK_SIZE, text_length)
-		chunks.append(text[start:end])
-		if end == text_length:
-			break
-		next_start = end - CHUNK_OVERLAP
-		if next_start <= start:
-			next_start = end
-		start = next_start
+	current: List[str] = []
+	current_len = 0
+
+	def flush_current() -> None:
+		nonlocal current, current_len
+		chunk = "\n\n".join(seg.strip() for seg in current if seg.strip())
+		if chunk:
+			chunks.append(chunk)
+		current = []
+		current_len = 0
+
+	for para in paragraphs:
+		if _looks_like_heading(para) and current:
+			flush_current()
+		if _looks_like_heading(para):
+			current = [para]
+			current_len = len(para)
+			continue
+
+		segments = _shard_long_text(para)
+		for segment in segments:
+			if not segment:
+				continue
+			projected = current_len + (2 if current else 0) + len(segment)
+			if current and projected > CHUNK_SIZE:
+				flush_current()
+			current.append(segment)
+			current_len = len("\n\n".join(current))
+
+	if current:
+		flush_current()
+
 	return chunks
+
+
+def _split_paragraphs(text: str) -> List[str]:
+	"""按照空行拆分段落，并清理多余空白。"""
+
+	if not text:
+		return []
+	normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+	parts = re.split(r"\n\s*\n+", normalized)
+	return [part.strip() for part in parts if part.strip()]
+
+
+def _looks_like_heading(paragraph: str) -> bool:
+	"""判断段落是否类似条款标题，用于切块边界。"""
+
+	if not paragraph:
+		return False
+	text = paragraph.strip()
+	if len(text) > 120:
+		return False
+	if text.endswith(("。", "；", "，")):
+		return False
+	return any(pattern.match(text) for pattern in _HEADING_PATTERNS)
+
+
+def _shard_long_text(paragraph: str) -> List[str]:
+	"""将超长段落按句子/字数进一步切分。"""
+
+	paragraph = paragraph.strip()
+	if not paragraph:
+		return []
+	if len(paragraph) <= CHUNK_SIZE:
+		return [paragraph]
+
+	sentences = _split_sentences(paragraph)
+	segments: List[str] = []
+	buffer = ""
+	for sentence in sentences:
+		sentence = sentence.strip()
+		if not sentence:
+			continue
+		if len(sentence) > CHUNK_SIZE:
+			for start in range(0, len(sentence), CHUNK_SIZE):
+				segments.append(sentence[start:start + CHUNK_SIZE])
+			continue
+		if len(buffer) + len(sentence) <= CHUNK_SIZE:
+			buffer += sentence
+		else:
+			if buffer:
+				segments.append(buffer)
+			buffer = sentence
+	if buffer:
+		segments.append(buffer)
+	return segments
+
+
+def _split_sentences(text: str) -> List[str]:
+	"""基于中文标点的粗粒度句子切分。"""
+
+	separators = set("。！？!?；;\n")
+	sentences: List[str] = []
+	current: List[str] = []
+	for char in text:
+		current.append(char)
+		if char in separators:
+			sentence = "".join(current).strip()
+			if sentence:
+				sentences.append(sentence)
+			current = []
+	if current:
+		sentence = "".join(current).strip()
+		if sentence:
+			sentences.append(sentence)
+	return sentences
 
 
 def _collect_state_signature() -> Dict[str, object]:
