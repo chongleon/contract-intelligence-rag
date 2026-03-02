@@ -1,19 +1,33 @@
 import re
+import pandas as pd
 
-def normalize_amount(text: str):
+
+# ========= 字段标准化函数 ========
+
+def normalize_amount(text: str) -> float:
+    """
+    保额标准化：提取金额数值（单位：元）
+    支持格式：100万、100万元、1亿、5000元、5000
+    """
     if not text:
         return None
-    nums = re.findall(r"\d+", text)
+    # 匹配数字（支持小数）
+    nums = re.findall(r"\d+\.?\d*", text)
     if not nums:
         return None
     value = float(nums[0])
-    if "万" in text:
-        return value * 10000
+    # 单位转换
     if "亿" in text:
         return value * 100000000
+    if "万" in text:
+        return value * 10000
     return value
 
-def normalize_waiting(text: str):
+def normalize_waiting(text: str) -> int:
+    """
+    等待期标准化：提取天数
+    支持格式：90天、90日、90
+    """
     if not text:
         return None
     nums = re.findall(r"\d+", text)
@@ -21,11 +35,39 @@ def normalize_waiting(text: str):
         return None
     return int(nums[0])
 
+def normalize_period(text: str) -> int:
+    """
+    保险期间标准化：提取年数
+    支持格式：1年、一年、终身、终身保障
+    """
+    if not text:
+        return None
+    # 终身返回 -1 表示特殊值
+    if "终身" in text:
+        return -1
+    # 中文数字映射
+    cn_nums = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, 
+               "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+    for cn, num in cn_nums.items():
+        if cn in text:
+            return num
+    # 阿拉伯数字
+    nums = re.findall(r"\d+", text)
+    if nums:
+        return int(nums[0])
+    return None
+
 def standardize(data: dict) -> dict:
+    """
+    标准化LLM抽取的JSON数据
+    输入：原始抽取结果
+    输出：包含原始值和标准化值的字典
+    """
     return {
         "product_name": data.get("product_name", ""),
         "insurance_type": data.get("insurance_type", ""),
-        "coverage_period": data.get("coverage_period", ""),
+        "coverage_period_raw": data.get("coverage_period", ""),
+        "coverage_period_value": normalize_period(data.get("coverage_period", "")),
         "coverage_amount_raw": data.get("coverage_amount", ""),
         "coverage_amount_value": normalize_amount(data.get("coverage_amount", "")),
         "waiting_period_raw": data.get("waiting_period", ""),
@@ -34,18 +76,17 @@ def standardize(data: dict) -> dict:
     }
 
 
-# ====== 单独测试 ======
-if __name__ == "__main__":
-    sample = {
-        "coverage_amount": "100万元",
-        "waiting_period": "90天"
-    }
-    print(standardize(sample))
+# ========= 产品对比函数 =========
 
 def compare_policy(a: dict, b: dict) -> dict:
+    """
+    对比两个标准化后的保险产品，返回对比结论
+    输入：两个标准化后的字典
+    输出：对比结论字典
+    """
     result = {}
 
-    # 保额比较
+    # 保额比较（越高越好）
     if a["coverage_amount_value"] and b["coverage_amount_value"]:
         if a["coverage_amount_value"] > b["coverage_amount_value"]:
             result["coverage_amount"] = "A更高"
@@ -63,4 +104,139 @@ def compare_policy(a: dict, b: dict) -> dict:
         else:
             result["waiting_period"] = "相同"
 
+    # 保险期间比较
+    if a["coverage_period_value"] and b["coverage_period_value"]:
+        if a["coverage_period_value"] == -1 and b["coverage_period_value"] != -1:
+            result["coverage_period"] = "A更优（终身）"
+        elif b["coverage_period_value"] == -1 and a["coverage_period_value"] != -1:
+            result["coverage_period"] = "B更优（终身）"
+        elif a["coverage_period_value"] > b["coverage_period_value"]:
+            result["coverage_period"] = "A更长"
+        elif a["coverage_period_value"] < b["coverage_period_value"]:
+            result["coverage_period"] = "B更长"
+        else:
+            result["coverage_period"] = "相同"
+
     return result
+
+
+def generate_compare_table(a: dict, b: dict, name_a: str = "产品A", name_b: str = "产品B") -> pd.DataFrame:
+    """
+    生成对比表格（DataFrame格式）
+    输入：两个标准化后的字典，可选产品名称
+    输出：pandas DataFrame
+    """
+    # 格式化保额显示
+    def format_amount(value):
+        if value is None:
+            return "-"
+        if value >= 100000000:
+            return f"{value/100000000:.0f}亿"
+        if value >= 10000:
+            return f"{value/10000:.0f}万"
+        return f"{value:.0f}元"
+
+    # 格式化保险期间显示
+    def format_period(value, raw):
+        if value is None:
+            return raw or "-"
+        if value == -1:
+            return "终身"
+        return f"{value}年"
+
+    # 格式化等待期显示
+    def format_waiting(value):
+        if value is None:
+            return "-"
+        return f"{value}天"
+
+    # 构建表格数据
+    data = {
+        "对比项": ["产品名称", "保险类型", "保险期间", "保额", "等待期", "免责条款数"],
+        name_a: [
+            a.get("product_name", "-"),
+            a.get("insurance_type", "-"),
+            format_period(a.get("coverage_period_value"), a.get("coverage_period_raw", "")),
+            format_amount(a.get("coverage_amount_value")),
+            format_waiting(a.get("waiting_period_value")),
+            len(a.get("exclusions", []))
+        ],
+        name_b: [
+            b.get("product_name", "-"),
+            b.get("insurance_type", "-"),
+            format_period(b.get("coverage_period_value"), b.get("coverage_period_raw", "")),
+            format_amount(b.get("coverage_amount_value")),
+            format_waiting(b.get("waiting_period_value")),
+            len(b.get("exclusions", []))
+        ]
+    }
+
+    # 添加对比结论行
+    compare_result = compare_policy(a, b)
+    
+    conclusion_a = []
+    conclusion_b = []
+    
+    if "coverage_amount" in compare_result:
+        if "A更高" in compare_result["coverage_amount"]:
+            conclusion_a.append("保额更优")
+        elif "B更高" in compare_result["coverage_amount"]:
+            conclusion_b.append("保额更优")
+    
+    if "waiting_period" in compare_result:
+        if "A更优" in compare_result["waiting_period"]:
+            conclusion_a.append("等待期更短")
+        elif "B更优" in compare_result["waiting_period"]:
+            conclusion_b.append("等待期更短")
+    
+    if "coverage_period" in compare_result:
+        if "A更优" in compare_result["coverage_period"] or "A更长" in compare_result["coverage_period"]:
+            conclusion_a.append("期间更优")
+        elif "B更优" in compare_result["coverage_period"] or "B更长" in compare_result["coverage_period"]:
+            conclusion_b.append("期间更优")
+    
+    data["对比项"].append("对比结论")
+    data[name_a].append("、".join(conclusion_a) if conclusion_a else "-")
+    data[name_b].append("、".join(conclusion_b) if conclusion_b else "-")
+
+    # 创建DataFrame
+    df = pd.DataFrame(data)
+    return df
+
+
+# ====== 单独测试 ======
+if __name__ == "__main__":
+    # 测试标准化函数
+    print("=== 测试标准化函数 ===")
+    sample_a = {
+        "product_name": "泰康医疗险",
+        "insurance_type": "医疗险",
+        "coverage_period": "1年",
+        "coverage_amount": "100万元",
+        "waiting_period": "90天",
+        "exclusions": ["既往症", "整形美容"]
+    }
+    sample_b = {
+        "product_name": "平安医疗险",
+        "insurance_type": "医疗险",
+        "coverage_period": "终身",
+        "coverage_amount": "80万元",
+        "waiting_period": "60天",
+        "exclusions": ["既往症"]
+    }
+
+    std_a = standardize(sample_a)
+    std_b = standardize(sample_b)
+
+    print("A标准化结果:", std_a)
+    print("B标准化结果:", std_b)
+
+    # 测试compare_policy（返回对比结论）
+    print("\n=== 测试compare_policy（对比结论）===")
+    result = compare_policy(std_a, std_b)
+    print("对比结论:", result)
+
+    # 测试generate_compare_table（返回表格）
+    print("\n=== 测试generate_compare_table（对比表格）===")
+    table = generate_compare_table(std_a, std_b, "泰康医疗险", "平安医疗险")
+    print(table)
