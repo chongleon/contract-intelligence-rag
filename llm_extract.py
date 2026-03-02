@@ -62,7 +62,9 @@ def llm_extract(text: str) -> dict:
         temperature=0
     )
 
-    print("完整response：", response)   
+    print("\n===== 完整 response =====")
+    print(json.dumps(response, ensure_ascii=False, indent=2))
+    print("=========================\n")   
 
     if response is None:
         print("API调用失败，response为None")
