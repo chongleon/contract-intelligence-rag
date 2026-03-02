@@ -50,7 +50,7 @@ def clean_json(text: str) -> str:
         text = text.replace("```", "")
     return text
 
-def llm_extract(text: str) -> dict:
+def llm_extract(text: str):
     prompt = build_prompt(text)
 
     response = Generation.call(
@@ -62,9 +62,13 @@ def llm_extract(text: str) -> dict:
         temperature=0
     )
 
-    print("\n===== 完整 response =====")
-    print(json.dumps(response, ensure_ascii=False, indent=2))
-    print("=========================\n")   
+    print("\n===== Token 使用情况 =====")
+    print("input_tokens:", response["usage"]["input_tokens"])
+    print("output_tokens:", response["usage"]["output_tokens"])
+    print("total_tokens:", response["usage"]["total_tokens"])
+    print("===========================\n")   
+
+    total_tokens = response["usage"]["total_tokens"]
 
     if response is None:
         print("API调用失败，response为None")
@@ -83,7 +87,7 @@ def llm_extract(text: str) -> dict:
         print("JSON解析失败:", e)
         result = SCHEMA_TEMPLATE
 
-    return result
+    return result, total_tokens
 
 
 # ====== 单独测试用 ======
