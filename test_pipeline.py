@@ -1,6 +1,6 @@
 from llm_extract import llm_extract
 from llm_explain import llm_explain
-from standardize import standardize, compare_policy
+from standardize import standardize, compare_policy, generate_compare_table
 import json
 
 # ===== 两个测试文本 =====
@@ -21,6 +21,7 @@ explain_b = llm_explain(json_b)
 
 # ===== 第四步：对比 =====
 compare_result = compare_policy(std_a, std_b)
+table = generate_compare_table(std_a, std_b)
 
 # ===== 打印结果 =====
 print("\n===== A结构化结果 =====")
@@ -43,3 +44,5 @@ print(json.dumps(explain_b, ensure_ascii=False, indent=2))
 
 print("\n===== 对比结果 =====")
 print(compare_result)
+print("\n===== 对比表格 =====")
+print(table)
