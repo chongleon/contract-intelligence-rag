@@ -17,8 +17,8 @@ try:
         result, _ = llm_extract(text)
         return result
     
-    def rag_pipeline(query: str) -> list:
-        return rag_search(query)    
+    def rag_pipeline(query: str) -> dict:
+        return rag_search(query)
 except ImportError as e:
     st.error(f"导入失败: {e}")
     st.stop()
@@ -359,31 +359,37 @@ else:
         # 调用RAG获取回答
         with st.chat_message("assistant"):
             with st.spinner("正在检索..."):
-                results = rag_pipeline(user_input)
-            
-            if results:
-                first_result = results[0]
-                answer = first_result.get('content', '')
-                source = first_result.get('source', '')
-                
-                st.write(answer)
-                
+                rag_result = rag_pipeline(user_input)
+
+            answer = (rag_result.get("answer") or "").strip()
+            contexts = rag_result.get("contexts") or []
+
+            if not answer:
+                answer = "未找到相关条款，暂无法回答。"
+
+            st.write(answer)
+
+            source_labels = []
+            for ctx in contexts:
+                source = ctx.get("source") if isinstance(ctx, dict) else None
+                chunk_id = ctx.get("chunk_id") if isinstance(ctx, dict) else None
+                label_parts = []
                 if source:
-                    st.caption(f"来源: {source}")
-                
-                st.session_state.messages.append({
-                    "role": "assistant", 
-                    "content": answer,
-                    "source": source
-                })
-            else:
-                no_answer = "未找到相关条款。"
-                st.write(no_answer)
-                st.session_state.messages.append({
-                    "role": "assistant", 
-                    "content": no_answer,
-                    "source": ""
-                })
+                    label_parts.append(str(source))
+                if chunk_id:
+                    label_parts.append(str(chunk_id))
+                if label_parts:
+                    source_labels.append(" / ".join(label_parts))
+
+            source_text = "; ".join(source_labels)
+            if source_text:
+                st.caption(f"参考来源: {source_text}")
+
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": answer,
+                "source": source_text
+            })
 
 # 页脚
 st.markdown("---")

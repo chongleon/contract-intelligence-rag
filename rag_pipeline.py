@@ -14,7 +14,7 @@ import chromadb
 import dashscope
 from chromadb.api.models.Collection import Collection
 from chromadb.errors import NotFoundError
-from dashscope import TextEmbedding
+from dashscope import Generation, TextEmbedding
 from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
@@ -36,6 +36,7 @@ MANIFEST_PATH = VECTOR_DIR / "manifest.json"
 COLLECTION_NAME = "insurance_clauses"
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY")
 DASHSCOPE_EMBEDDING_MODEL = os.getenv("RAG_DASHSCOPE_EMBEDDING_MODEL", "text-embedding-v4")
+DASHSCOPE_COMPLETION_MODEL = os.getenv("RAG_DASHSCOPE_COMPLETION_MODEL", "qwen-turbo")
 
 dashscope.api_key = DASHSCOPE_API_KEY
 if not dashscope.api_key:
@@ -44,6 +45,7 @@ if not dashscope.api_key:
 CHUNK_SIZE = 400
 CHUNK_OVERLAP = 80
 DEFAULT_TOP_K = 5
+DEFAULT_MAX_OUTPUT_TOKENS = int(os.getenv("RAG_MAX_OUTPUT_TOKENS", "1200"))
 _HEADING_PATTERNS = [
 	re.compile(r"^第[一二三四五六七八九十百千万零]+[章节条款]?"),
 	re.compile(r"^第?\d+[章节条款]?"),
@@ -51,12 +53,17 @@ _HEADING_PATTERNS = [
 	re.compile(r"^[（(]?[一二三四五六七八九十]+[）).、]"),
 	re.compile(r"^[A-Za-z]{1,3}[\.、]\s*"),
 ]
+RAG_SYSTEM_PROMPT = (
+	"你是保险条款问答助手。严格依赖提供的条款片段回答问题，"
+	"如信息不足必须明确说明无法回答，不要编造。输出简洁中文并保留必要条理。"
+)
+
 
 _collection: Collection | None = None
 
 
-def rag_pipeline(query: str) -> list:
-	"""面向外部的检索函数，输入 query 输出最相关的段落列表。"""
+def rag_pipeline(query: str) -> Dict[str, object]:
+	"""执行 RAG：检索相关段落并使用 LLM 生成回答。"""
 
 	query = (query or "").strip()
 	if not query:
@@ -70,19 +77,75 @@ def rag_pipeline(query: str) -> list:
 	metadatas = results.get("metadatas", [[]])[0]
 	distances = results.get("distances", [[]])[0]
 
-	response = []
+	contexts: List[Dict[str, object]] = []
 	for doc, meta, distance in zip(documents, metadatas, distances):
 		if not doc:
 			continue
 		similarity = 1 - distance if distance is not None else None
-		response.append({
+		context = {
 			"content": doc,
 			"score": round(similarity, 4) if similarity is not None else None,
 			"source": meta.get("source") if meta else None,
 			"chunk_id": meta.get("chunk_id") if meta else None,
-		})
+		}
+		contexts.append(context)
 
-	return response
+	if not contexts:
+		return {
+			"answer": "未检索到相关条款，无法回答该问题。",
+			"contexts": [],
+		}
+
+	answer = _generate_rag_answer(query, contexts)
+	return {
+		"answer": answer,
+		"contexts": contexts,
+	}
+
+
+def _generate_rag_answer(query: str, contexts: List[Dict[str, object]]) -> str:
+	"""调用 DashScope LLM，基于检索上下文生成回答。"""
+
+	context_blocks: List[str] = []
+	for idx, item in enumerate(contexts, start=1):
+		source = item.get("source") or "unknown"
+		chunk_id = item.get("chunk_id") or f"chunk_{idx}"
+		score = item.get("score")
+		prefix = f"[片段{idx}] 来源: {source} | chunk_id: {chunk_id}"
+		if score is not None:
+			prefix += f" | 相似度: {score}"
+		context_blocks.append(f"{prefix}\n{item.get('content', '')}")
+
+	context_text = "\n\n".join(context_blocks)
+	user_prompt = (
+		"请仅依据以下检索到的保险条款片段回答用户问题，必要时在句末使用"
+		"【chunk_id】标注来源；若无法回答请明确说明。\n"
+		f"用户问题：{query}\n"
+		"检索片段：\n"
+		f"{context_text}"
+	)
+
+	try:
+		response = Generation.call(
+			model=DASHSCOPE_COMPLETION_MODEL,
+			messages=[
+				{"role": "system", "content": RAG_SYSTEM_PROMPT},
+				{"role": "user", "content": user_prompt},
+			],
+			temperature=0.2,
+			max_output_tokens=DEFAULT_MAX_OUTPUT_TOKENS,
+		)
+	except Exception as exc:
+		raise RuntimeError("DashScope 生成回答失败") from exc
+
+	output = response.get("output") if isinstance(response, dict) else None
+	if not output:
+		raise RuntimeError("DashScope 响应缺少 output 字段")
+	content = output.get("text")
+	if not content:
+		raise RuntimeError("DashScope 响应缺少 text 字段")
+
+	return content.strip()
 
 
 def _ensure_collection_ready() -> Collection:
