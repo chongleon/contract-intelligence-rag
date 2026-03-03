@@ -1,9 +1,11 @@
-import streamlit as st
-import pandas as pd
-import sys
-import os
+import html
 import json
+import os
+import sys
 from pathlib import Path
+
+import pandas as pd
+import streamlit as st
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -83,6 +85,28 @@ st.markdown("""
     }
     .exclusion-item:last-child {
         border-bottom: none;
+    }
+    .source-chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+        margin-top: 0.3rem;
+    }
+    .source-chip {
+        background-color: #eef2f7;
+        color: #1E3D59;
+        padding: 0.2rem 0.8rem;
+        border-radius: 999px;
+        font-size: 0.85rem;
+        border: 1px solid #d0d8e8;
+        cursor: help;
+        max-width: 320px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        overflow: hidden;
+    }
+    .source-chip:hover {
+        background-color: #dfe8f4;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -369,26 +393,36 @@ else:
 
             st.write(answer)
 
-            source_labels = []
-            for ctx in contexts:
-                source = ctx.get("source") if isinstance(ctx, dict) else None
-                chunk_id = ctx.get("chunk_id") if isinstance(ctx, dict) else None
+            chip_html = []
+            for idx, ctx in enumerate(contexts, start=1):
+                if not isinstance(ctx, dict):
+                    continue
+                source = ctx.get("source")
+                chunk_id = ctx.get("chunk_id")
                 label_parts = []
                 if source:
                     label_parts.append(str(source))
                 if chunk_id:
                     label_parts.append(str(chunk_id))
-                if label_parts:
-                    source_labels.append(" / ".join(label_parts))
+                label = " / ".join(label_parts) if label_parts else f"片段{idx}"
+                tooltip = (ctx.get("content") or "").strip().replace("\n", " ")
+                tooltip = tooltip[:800]
+                chip_html.append(
+                    f"<span class='source-chip' title='{html.escape(tooltip)}'>"
+                    f"{html.escape(label)}</span>"
+                )
 
-            source_text = "; ".join(source_labels)
-            if source_text:
-                st.caption(f"参考来源: {source_text}")
+            if chip_html:
+                st.caption("参考来源（悬浮查看原文片段）")
+                st.markdown(
+                    "<div class='source-chips'>" + "".join(chip_html) + "</div>",
+                    unsafe_allow_html=True,
+                )
 
             st.session_state.messages.append({
                 "role": "assistant",
                 "content": answer,
-                "source": source_text
+                "source": "参考来源"
             })
 
 # 页脚
