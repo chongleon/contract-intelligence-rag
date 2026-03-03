@@ -26,14 +26,64 @@ def normalize_amount(text: str) -> float:
 def normalize_waiting(text: str) -> int:
     """
     等待期标准化：提取天数
-    支持格式：90天、90日、90
+    支持格式：90天、90日、90、三十天、一百八十天
     """
     if not text:
         return None
+    
+    # 中文数字映射
+    cn_nums = {"零": 0, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, 
+               "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+    
+    # 尝试匹配中文数字（如：三十天、一百八十天）
+    cn_num_str = ""
+    for char in text:
+        if char in cn_nums or char in ["十", "百"]:
+            cn_num_str += char
+        elif cn_num_str:  # 遇到非数字字符，停止收集
+            break
+    
+    if cn_num_str:
+        # 解析中文数字
+        result = 0
+        i = 0
+        while i < len(cn_num_str):
+            char = cn_num_str[i]
+            if char == "十":
+                if result == 0:
+                    result = 10
+                else:
+                    result = result * 10
+            elif char == "百":
+                if result == 0:
+                    result = 100
+                else:
+                    result = result * 100
+            elif char in cn_nums:
+                # 检查下一个字符
+                if i + 1 < len(cn_num_str):
+                    next_char = cn_num_str[i + 1]
+                    if next_char == "十":
+                        result += cn_nums[char] * 10
+                        i += 1
+                    elif next_char == "百":
+                        result += cn_nums[char] * 100
+                        i += 1
+                    else:
+                        result += cn_nums[char]
+                else:
+                    result += cn_nums[char]
+            i += 1
+        
+        if result > 0:
+            return result
+    
+    # 阿拉伯数字
     nums = re.findall(r"\d+", text)
-    if not nums:
-        return None
-    return int(nums[0])
+    if nums:
+        return int(nums[0])
+    
+    return None
 
 def normalize_period(text: str) -> int:
     """
@@ -72,7 +122,8 @@ def standardize(data: dict) -> dict:
         "coverage_amount_value": normalize_amount(data.get("coverage_amount", "")),
         "waiting_period_raw": data.get("waiting_period", ""),
         "waiting_period_value": normalize_waiting(data.get("waiting_period", "")),
-        "exclusions": data.get("exclusions", [])
+        "exclusions": data.get("exclusions", []),
+        "exclusions_count": len(data.get("exclusions", []))  # 新增：免责条款数量
     }
 
 
@@ -83,10 +134,16 @@ def compare_policy(a: dict, b: dict) -> dict:
     对比两个标准化后的保险产品，返回对比结论
     输入：两个标准化后的字典
     输出：对比结论字典
+    
+    对比维度：
+    - 保额：越高越好（当两者都有值时）
+    - 等待期：越短越好
+    - 保险期间：越长越好/终身最优
+    - 免责条款数：越少越好
     """
     result = {}
 
-    # 保额比较（越高越好）
+    # 保额比较（越高越好）- 仅当两者都有值时
     if a["coverage_amount_value"] and b["coverage_amount_value"]:
         if a["coverage_amount_value"] > b["coverage_amount_value"]:
             result["coverage_amount"] = "A更高"
@@ -104,7 +161,7 @@ def compare_policy(a: dict, b: dict) -> dict:
         else:
             result["waiting_period"] = "相同"
 
-    # 保险期间比较
+    # 保险期间比较（越长越好，终身最优）
     if a["coverage_period_value"] and b["coverage_period_value"]:
         if a["coverage_period_value"] == -1 and b["coverage_period_value"] != -1:
             result["coverage_period"] = "A更优（终身）"
@@ -116,6 +173,15 @@ def compare_policy(a: dict, b: dict) -> dict:
             result["coverage_period"] = "B更长"
         else:
             result["coverage_period"] = "相同"
+
+    # 免责条款数比较（越少越优）
+    if a.get("exclusions_count") is not None and b.get("exclusions_count") is not None:
+        if a["exclusions_count"] < b["exclusions_count"]:
+            result["exclusions_count"] = "A更优（更少）"
+        elif a["exclusions_count"] > b["exclusions_count"]:
+            result["exclusions_count"] = "B更优（更少）"
+        else:
+            result["exclusions_count"] = "相同"
 
     return result
 
@@ -159,7 +225,7 @@ def generate_compare_table(a: dict, b: dict, name_a: str = "产品A", name_b: st
             format_period(a.get("coverage_period_value"), a.get("coverage_period_raw", "")),
             format_amount(a.get("coverage_amount_value")),
             format_waiting(a.get("waiting_period_value")),
-            len(a.get("exclusions", []))
+            a.get("exclusions_count", 0)
         ],
         name_b: [
             b.get("product_name", "-"),
@@ -167,7 +233,7 @@ def generate_compare_table(a: dict, b: dict, name_a: str = "产品A", name_b: st
             format_period(b.get("coverage_period_value"), b.get("coverage_period_raw", "")),
             format_amount(b.get("coverage_amount_value")),
             format_waiting(b.get("waiting_period_value")),
-            len(b.get("exclusions", []))
+            b.get("exclusions_count", 0)
         ]
     }
 
@@ -189,11 +255,19 @@ def generate_compare_table(a: dict, b: dict, name_a: str = "产品A", name_b: st
         elif "B更优" in compare_result["waiting_period"]:
             conclusion_b.append("等待期更短")
     
+    # 保险期间结论
     if "coverage_period" in compare_result:
         if "A更优" in compare_result["coverage_period"] or "A更长" in compare_result["coverage_period"]:
             conclusion_a.append("期间更优")
         elif "B更优" in compare_result["coverage_period"] or "B更长" in compare_result["coverage_period"]:
             conclusion_b.append("期间更优")
+    
+    # 免责条款数结论
+    if "exclusions_count" in compare_result:
+        if "A更优" in compare_result["exclusions_count"]:
+            conclusion_a.append("免责更少")
+        elif "B更优" in compare_result["exclusions_count"]:
+            conclusion_b.append("免责更少")
     
     data["对比项"].append("对比结论")
     data[name_a].append("、".join(conclusion_a) if conclusion_a else "-")
