@@ -42,7 +42,7 @@ dashscope.api_key = DASHSCOPE_API_KEY
 if not dashscope.api_key:
 	raise RuntimeError("请在环境变量或 .env 中配置 DASHSCOPE_API_KEY")
 
-CHUNK_SIZE = 400
+CHUNK_SIZE = 600
 CHUNK_OVERLAP = 80
 DEFAULT_TOP_K = 5
 DEFAULT_MAX_OUTPUT_TOKENS = int(os.getenv("RAG_MAX_OUTPUT_TOKENS", "1200"))
@@ -118,8 +118,9 @@ def _generate_rag_answer(query: str, contexts: List[Dict[str, object]]) -> str:
 
 	context_text = "\n\n".join(context_blocks)
 	user_prompt = (
-		"请仅依据以下检索到的保险条款片段回答用户问题，必要时在句末使用"
-		"【chunk_id】标注来源；若无法回答请明确说明。\n"
+		"请仅依据以下检索到的保险条款片段回答用户问题。每当引用某片段时，"
+		"需在句末使用[[chunk_id]]格式标注对应来源，chunk_id 必须来自给定片段；"
+		"若信息不足需明确说明无法回答。\n"
 		f"用户问题：{query}\n"
 		"检索片段：\n"
 		f"{context_text}"
