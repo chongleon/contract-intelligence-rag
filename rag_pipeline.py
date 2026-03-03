@@ -16,7 +16,6 @@ from chromadb.api.models.Collection import Collection
 from chromadb.errors import NotFoundError
 from dashscope import TextEmbedding
 from dotenv import load_dotenv
-from pypdf import PdfReader
 
 logger = logging.getLogger(__name__)
 if not logger.handlers:
@@ -31,7 +30,7 @@ load_dotenv()
 
 
 BASE_DIR = Path(__file__).resolve().parent
-PDF_DIR = BASE_DIR / "pdf"
+TEXT_DIR = BASE_DIR / "data" / "raw"
 VECTOR_DIR = BASE_DIR / "vector_store"
 MANIFEST_PATH = VECTOR_DIR / "manifest.json"
 COLLECTION_NAME = "insurance_clauses"
@@ -151,7 +150,7 @@ def _rebuild_collection(client: chromadb.PersistentClient, embedding_fn) -> None
 
 	documents, metadatas, ids = _prepare_documents()
 	if not documents:
-		raise RuntimeError("未在 pdf 目录中找到可用文本，无法构建向量库")
+		raise RuntimeError("未在 data/raw 目录中找到可用文本，无法构建向量库")
 
 	collection.add(
 		ids=ids,
@@ -163,23 +162,23 @@ def _rebuild_collection(client: chromadb.PersistentClient, embedding_fn) -> None
 
 
 def _prepare_documents() -> tuple[List[str], List[Dict[str, str]], List[str]]:
-	"""读取 PDF、切块并输出 Chroma 需要的字段。"""
+	"""读取文本文件、切块并输出 Chroma 需要的字段。"""
 
 	documents: List[str] = []
 	metadatas: List[Dict[str, str]] = []
 	ids: List[str] = []
 
-	if not PDF_DIR.exists():
-		raise FileNotFoundError(f"未找到 PDF 目录: {PDF_DIR}")
+	if not TEXT_DIR.exists():
+		raise FileNotFoundError(f"未找到文本目录: {TEXT_DIR}")
 
-	for pdf_path in sorted(PDF_DIR.glob("*.pdf")):
-		text = _extract_text(pdf_path)
+	for text_path in sorted(TEXT_DIR.glob("*.txt")):
+		text = _read_text_file(text_path)
 		chunks = _chunk_text(text)
 		for idx, chunk in enumerate(chunks):
-			chunk_id = f"{pdf_path.stem}_{idx}"
+			chunk_id = f"{text_path.stem}_{idx}"
 			documents.append(chunk)
 			metadatas.append({
-				"source": pdf_path.name,
+				"source": text_path.name,
 				"chunk_id": chunk_id,
 			})
 			ids.append(chunk_id)
@@ -187,19 +186,13 @@ def _prepare_documents() -> tuple[List[str], List[Dict[str, str]], List[str]]:
 	return documents, metadatas, ids
 
 
-def _extract_text(pdf_path: Path) -> str:
-	"""将 PDF 文本抽出为单一字符串。"""
+def _read_text_file(file_path: Path) -> str:
+	"""读取 txt 文件内容并规范化换行。"""
 
-	reader = PdfReader(str(pdf_path))
-	pages = []
-	for page in reader.pages:
-		content = page.extract_text() or ""
-		content = content.strip()
-		if content:
-			pages.append(content)
-	full_text = "\n".join(pages)
-	logger.info("完成 PDF 解析: %s", pdf_path.name)
-	return full_text
+	content = file_path.read_text(encoding="utf-8")
+	content = content.replace("\r\n", "\n").replace("\r", "\n")
+	logger.info("读取文本: %s", file_path.name)
+	return content
 
 
 def _chunk_text(text: str) -> List[str]:
@@ -320,7 +313,7 @@ def _split_sentences(text: str) -> List[str]:
 
 
 def _collect_state_signature() -> Dict[str, object]:
-	"""综合记录 pdf 变更与 embedding 配置，用于判断是否需重建。"""
+	"""综合记录文本源变更与 embedding 配置，用于判断是否需重建。"""
 
 	return {
 		"files": _collect_file_signature(),
@@ -332,15 +325,15 @@ def _collect_state_signature() -> Dict[str, object]:
 
 
 def _collect_file_signature() -> Dict[str, Dict[str, float]]:
-	"""生成当前 pdf 目录下文件的指纹信息。"""
+	"""生成 data/raw 下 txt 文件的指纹信息。"""
 
 	signature: Dict[str, Dict[str, float]] = {}
-	if not PDF_DIR.exists():
+	if not TEXT_DIR.exists():
 		return signature
 
-	for pdf_path in sorted(PDF_DIR.glob("*.pdf")):
-		stat = pdf_path.stat()
-		signature[str(pdf_path.name)] = {
+	for text_path in sorted(TEXT_DIR.glob("*.txt")):
+		stat = text_path.stat()
+		signature[str(text_path.name)] = {
 			"mtime": stat.st_mtime,
 			"size": stat.st_size,
 		}
