@@ -1,6 +1,7 @@
 import html
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -24,6 +25,70 @@ try:
 except ImportError as e:
     st.error(f"导入失败: {e}")
     st.stop()
+
+
+CITATION_PATTERN = re.compile(r"\[\[\s*(?:chunk_id\s*:\s*)?([^\[\]]+?)\s*\]\]")
+# 注意：此处的值应与`rag_pipeline.py`中的`CHUNK_SIZE`的值保持一致
+MAX_TOOLTIP_CHARS = 600
+
+
+def render_answer_with_citations(answer, contexts) -> str:
+    """将 [[chunk_id]] 标注渲染为可悬浮提示的引用，同时展示来源 chips。"""
+
+    if not answer:
+        return ""
+
+    context_map = {}
+    for ctx in contexts:
+        if not isinstance(ctx, dict):
+            continue
+        chunk_id = ctx.get("chunk_id")
+        if chunk_id:
+            context_map[str(chunk_id).strip()] = ctx
+
+    parts = []
+    last_idx = 0
+    for match in CITATION_PATTERN.finditer(answer):
+        parts.append(html.escape(answer[last_idx:match.start()]))
+        chunk_id = match.group(1).strip()
+        ctx = context_map.get(chunk_id)
+        raw_tooltip = (ctx.get("content") if ctx else "") or ""
+        tooltip = raw_tooltip.strip().replace("\n", " ")
+        if len(tooltip) > MAX_TOOLTIP_CHARS:
+            tooltip = tooltip[:MAX_TOOLTIP_CHARS] + "..."
+        tooltip = html.escape(tooltip)
+        label_text = ctx.get("source") if ctx else chunk_id
+        label = html.escape(str(label_text or chunk_id))
+        data_chunk = html.escape(chunk_id)
+        parts.append(
+            f"<sup class='citation' title='{tooltip}' data-chunk='{data_chunk}'>[{label}]</sup>"
+        )
+        last_idx = match.end()
+    parts.append(html.escape(answer[last_idx:]))
+
+    text_html = "".join(parts).replace("\n", "<br>")
+
+    chip_html = []
+    for idx, ctx in enumerate(contexts, start=1):
+        if not isinstance(ctx, dict):
+            continue
+        chunk_id = str(ctx.get("chunk_id") or f"chunk_{idx}")
+        source = str(ctx.get("source") or "")
+        label = source or chunk_id
+        tooltip = (ctx.get("content") or "").strip().replace("\n", " ")
+        if len(tooltip) > MAX_TOOLTIP_CHARS:
+            tooltip = tooltip[:MAX_TOOLTIP_CHARS] + "..."
+        chip_html.append(
+            f"<span class='source-chip' title='{html.escape(tooltip)}'>"
+            f"{html.escape(label)}</span>"
+        )
+
+    chips_section = (
+        "<div class='source-chips'>" + "".join(chip_html) + "</div>"
+        if chip_html else ""
+    )
+
+    return f"<div class='answer-block'><div class='answer-text'>{text_html}</div>{chips_section}</div>"
 
 # 页面
 st.set_page_config(
@@ -107,6 +172,23 @@ st.markdown("""
     }
     .source-chip:hover {
         background-color: #dfe8f4;
+    }
+    .answer-block {
+        line-height: 1.6;
+    }
+    .answer-text {
+        font-size: 1rem;
+        color: #1E3D59;
+    }
+    .citation {
+        background-color: #e6eef7;
+        color: #1E3D59;
+        border-radius: 4px;
+        padding: 0 0.2rem;
+        margin-left: 0.2rem;
+        font-size: 0.75rem;
+        cursor: help;
+        display: inline-block;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -358,10 +440,12 @@ else:
     # 显示聊天记录
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
-            st.write(msg["content"])
-            # 如果是助手的回答且有来源，显示来源
-            if msg["role"] == "assistant" and msg.get("source"):
-                st.caption(f"来源: {msg['source']}")
+            if msg["role"] == "assistant" and msg.get("html_content"):
+                st.markdown(msg["html_content"], unsafe_allow_html=True)
+            else:
+                st.write(msg["content"])
+                if msg["role"] == "assistant" and msg.get("source"):
+                    st.caption(f"来源: {msg['source']}")
     
     # 处理示例问题
     if "example_query" in st.session_state:
@@ -391,38 +475,17 @@ else:
             if not answer:
                 answer = "未找到相关条款，暂无法回答。"
 
-            st.write(answer)
-
-            chip_html = []
-            for idx, ctx in enumerate(contexts, start=1):
-                if not isinstance(ctx, dict):
-                    continue
-                source = ctx.get("source")
-                chunk_id = ctx.get("chunk_id")
-                label_parts = []
-                if source:
-                    label_parts.append(str(source))
-                if chunk_id:
-                    label_parts.append(str(chunk_id))
-                label = " / ".join(label_parts) if label_parts else f"片段{idx}"
-                tooltip = (ctx.get("content") or "").strip().replace("\n", " ")
-                tooltip = tooltip[:800]
-                chip_html.append(
-                    f"<span class='source-chip' title='{html.escape(tooltip)}'>"
-                    f"{html.escape(label)}</span>"
-                )
-
-            if chip_html:
-                st.caption("参考来源（悬浮查看原文片段）")
-                st.markdown(
-                    "<div class='source-chips'>" + "".join(chip_html) + "</div>",
-                    unsafe_allow_html=True,
-                )
+            rendered_answer = render_answer_with_citations(answer, contexts)
+            if rendered_answer:
+                st.markdown(rendered_answer, unsafe_allow_html=True)
+            else:
+                st.write(answer)
 
             st.session_state.messages.append({
                 "role": "assistant",
                 "content": answer,
-                "source": "参考来源"
+                "html_content": rendered_answer,
+                "contexts": contexts,
             })
 
 # 页脚
